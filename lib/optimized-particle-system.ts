@@ -79,6 +79,10 @@ export class OptimizedParticleSystem {
   private handControls: HandControl[] = []
   private lastTime: number = 0
   private animationId: number | null = null
+  
+  // Meditation skeletons - one per hand center
+  private skeletons: THREE.Group[] = []
+  private skeletonMaterial: THREE.MeshPhongMaterial
 
   constructor(canvasId: string, params: ParticleSystemConfig) {
     this.canvas = document.getElementById(canvasId) as HTMLCanvasElement
@@ -140,6 +144,15 @@ export class OptimizedParticleSystem {
     this.initParticles()
     this.addLights()
     this.scene.add(this.mesh)
+
+    // Create skeleton material
+    this.skeletonMaterial = new THREE.MeshPhongMaterial({
+      color: 0xffffff,
+      emissive: 0x444444,
+      emissiveIntensity: 0.3,
+      transparent: true,
+      opacity: 0.7
+    })
 
     this.lastTime = performance.now()
   }
@@ -255,6 +268,9 @@ export class OptimizedParticleSystem {
   }
 
   update(deltaTime: number): void {
+    // Update skeletons to match current hand positions
+    this.updateSkeletons()
+    
     if (this.params.behavior === 'needleSphere') {
       this.updateNeedleSphere(deltaTime)
       return
@@ -296,10 +312,11 @@ export class OptimizedParticleSystem {
 
   /**
    * Needle sphere with smooth distance-based control:
-   * - Particles are constrained to spherical shells around a dynamic center.
+   * - Particles are ALWAYS constrained to perfect spherical shells around a dynamic center.
    * - Radius scales smoothly with distance between two hands only.
    * - Needles are oriented to always point toward the center.
    * - Needles move around the sphere with swimming motion.
+   * - STRICT sphere constraint ensures perfect sphere formation at all times.
    */
   private updateNeedleSphere(deltaTime: number): void {
     const center = new THREE.Vector3(0, 0, 0)
@@ -345,7 +362,7 @@ export class OptimizedParticleSystem {
     // Swimming motion parameters
     const swimSpeed = 4.0
     const time = performance.now() * 0.001
-    const lerpFactor = 0.15
+    const sphereConstraintStrength = 1.0 // Strong constraint to always maintain sphere
 
     for (let i = 0; i < this.particles.length; i++) {
       const particle = this.particles[i]
@@ -358,7 +375,7 @@ export class OptimizedParticleSystem {
       const toParticle = particle.position.clone().sub(center)
       const currentDist = toParticle.length()
       
-      // Project to sphere surface
+      // ALWAYS ensure particle is on sphere surface - strict constraint
       let toSurface: THREE.Vector3
       if (currentDist > 0.01) {
         toSurface = toParticle.clone().normalize()
@@ -367,7 +384,9 @@ export class OptimizedParticleSystem {
         toSurface = particle.direction.clone().normalize()
       }
       
+      // STRICT: Always project to exact sphere surface first
       const surfacePos = toSurface.clone().multiplyScalar(targetRadiusForParticle).add(center)
+      particle.position.copy(surfacePos) // Start from exact sphere position
       
       // Create tangential swimming motion (needles swimming around sphere)
       // Use two perpendicular tangent vectors for 3D flow
@@ -389,23 +408,54 @@ export class OptimizedParticleSystem {
         .multiplyScalar(Math.cos(phase) * swimSpeed)
         .add(tangent2.multiplyScalar(Math.sin(phase) * swimSpeed))
 
-      // Update velocity for smooth swimming
-      particle.velocity.lerp(swimDirection, deltaTime * 3.0)
+      // Update velocity for smooth swimming (only tangential component)
+      // Remove any radial component from velocity to maintain sphere
+      const currentRadial = toSurface.clone().multiplyScalar(
+        particle.velocity.clone().dot(toSurface)
+      )
+      const tangentialVelocity = particle.velocity.clone().sub(currentRadial)
+      const desiredTangentialVelocity = swimDirection
       
-      // Start from surface position and add swimming motion
-      particle.position.copy(surfacePos)
+      // Blend tangential velocities
+      tangentialVelocity.lerp(desiredTangentialVelocity, deltaTime * 3.0)
+      
+      // Update velocity (only tangential, no radial component)
+      particle.velocity.copy(tangentialVelocity)
+      
+      // Move particle along sphere surface using tangential velocity
       particle.position.add(particle.velocity.clone().multiplyScalar(deltaTime))
       
-      // Re-project to sphere after movement
+      // STRICT: Always re-project to exact sphere surface after movement
+      // This ensures perfect sphere formation no matter what
       const newToParticle = particle.position.clone().sub(center)
-      if (newToParticle.lengthSq() > 0.01) {
+      if (newToParticle.lengthSq() > 0.0001) {
+        // Normalize and scale to exact radius
         newToParticle.normalize().multiplyScalar(targetRadiusForParticle)
         particle.position.copy(newToParticle.add(center))
+      } else {
+        // Fallback: use stored direction if too close to center
+        const fallbackPos = particle.direction.clone()
+          .normalize()
+          .multiplyScalar(targetRadiusForParticle)
+          .add(center)
+        particle.position.copy(fallbackPos)
+      }
+      
+      // Update stored direction to match current position (for future reference)
+      const updatedDirection = particle.position.clone().sub(center)
+      if (updatedDirection.lengthSq() > 0.0001) {
+        particle.direction.copy(updatedDirection.normalize())
       }
 
       // Orient needle so its local +Y axis points back to the center
-      const toCenter = center.clone().sub(particle.position).normalize()
-      this.tmpQuaternion.setFromUnitVectors(upAxis, toCenter)
+      const toCenter = center.clone().sub(particle.position)
+      if (toCenter.lengthSq() > 0.0001) {
+        toCenter.normalize()
+        this.tmpQuaternion.setFromUnitVectors(upAxis, toCenter)
+      } else {
+        // Fallback orientation
+        this.tmpQuaternion.identity()
+      }
 
       this.matrix.compose(particle.position, this.tmpQuaternion, this.tmpScale)
       this.mesh.setMatrixAt(i, this.matrix)
@@ -423,13 +473,14 @@ export class OptimizedParticleSystem {
     const upAxis = new THREE.Vector3(0, 1, 0)
     this.tmpScale.set(1, this.params.needleLength ?? 3.5, 1)
 
-    // NO HANDS: Animated 3D sphere with fish-like swimming motion
+    // NO HANDS: Form perfect sphere with swarming motion around center
     if (this.handControls.length === 0) {
       const center = new THREE.Vector3(0, 0, 0)
       const sphereRadius = 12
       const shellMultiplier = 1.8
       const swimSpeed = 5.0
       const time = performance.now() * 0.001
+      const sphereFormationSpeed = 0.4 // Fast sphere formation
 
       for (let i = 0; i < this.particles.length; i++) {
         const particle = this.particles[i]
@@ -442,50 +493,80 @@ export class OptimizedParticleSystem {
         const toParticle = particle.position.clone().sub(center)
         const currentDist = toParticle.length()
         
-        // Project to sphere surface
+        // STRICT: Always project to exact sphere surface first
+        let toSurface: THREE.Vector3
         if (currentDist > 0.01) {
-          toParticle.normalize()
+          toSurface = toParticle.clone().normalize()
         } else {
-          toParticle.copy(particle.direction).normalize()
+          // If at center, use stored direction
+          toSurface = particle.direction.clone().normalize()
         }
         
-        const surfacePos = toParticle.clone().multiplyScalar(targetRadius).add(center)
+        // Calculate target position on sphere
+        const surfacePos = toSurface.clone().multiplyScalar(targetRadius).add(center)
         
-        // Create tangential swimming motion (fish swimming around sphere)
+        // Fast convergence to sphere: quickly move particles to sphere surface
+        if (Math.abs(currentDist - targetRadius) > 0.5) {
+          particle.position.lerp(surfacePos, sphereFormationSpeed)
+        } else {
+          particle.position.copy(surfacePos)
+        }
+        
+        // Update stored direction
+        const updatedToSurface = particle.position.clone().sub(center)
+        if (updatedToSurface.lengthSq() > 0.0001) {
+          particle.direction.copy(updatedToSurface.normalize())
+        }
+        
+        // Create tangential swimming motion (swarm rotating around sphere)
         // Use two perpendicular tangent vectors for 3D flow
         const up = new THREE.Vector3(0, 1, 0)
         let tangent1 = new THREE.Vector3()
-        tangent1.crossVectors(toParticle, up)
+        tangent1.crossVectors(toSurface, up)
         if (tangent1.lengthSq() < 0.01) {
-          tangent1.crossVectors(toParticle, new THREE.Vector3(1, 0, 0))
+          tangent1.crossVectors(toSurface, new THREE.Vector3(1, 0, 0))
         }
         tangent1.normalize()
         
         let tangent2 = new THREE.Vector3()
-        tangent2.crossVectors(toParticle, tangent1)
+        tangent2.crossVectors(toSurface, tangent1)
         tangent2.normalize()
 
-        // Phase offset for each particle creates wave-like swimming
+        // Phase offset for each particle creates wave-like swarming
         const phase = i * 0.01 + time * 0.5
         const swimDirection = tangent1
           .multiplyScalar(Math.cos(phase) * swimSpeed)
           .add(tangent2.multiplyScalar(Math.sin(phase) * swimSpeed))
 
-        // Update velocity for smooth swimming
-        particle.velocity.lerp(swimDirection, deltaTime * 3.0)
+        // Update velocity for smooth swarming (only tangential component)
+        // Remove any radial component to maintain sphere
+        const currentRadial = toSurface.clone().multiplyScalar(
+          particle.velocity.clone().dot(toSurface)
+        )
+        const tangentialVelocity = particle.velocity.clone().sub(currentRadial)
         
-        // Constrain to sphere surface
-        particle.position.copy(surfacePos)
+        // Blend tangential velocities
+        tangentialVelocity.lerp(swimDirection, deltaTime * 3.0)
+        particle.velocity.copy(tangentialVelocity)
+        
+        // Move particle along sphere surface
         particle.position.add(particle.velocity.clone().multiplyScalar(deltaTime))
         
-        // Re-project to sphere after movement
+        // STRICT: Always re-project to exact sphere surface after movement
         const newToParticle = particle.position.clone().sub(center)
-        if (newToParticle.lengthSq() > 0.01) {
+        if (newToParticle.lengthSq() > 0.0001) {
           newToParticle.normalize().multiplyScalar(targetRadius)
           particle.position.copy(newToParticle.add(center))
+        } else {
+          // Fallback: use stored direction
+          const fallbackPos = particle.direction.clone()
+            .normalize()
+            .multiplyScalar(targetRadius)
+            .add(center)
+          particle.position.copy(fallbackPos)
         }
 
-        // Orient needle in swimming direction (fish-like)
+        // Orient needle in swarming direction
         const direction = particle.velocity.clone().normalize()
         if (direction.lengthSq() < 0.01) {
           // Fallback: point tangentially
@@ -501,42 +582,16 @@ export class OptimizedParticleSystem {
       return
     }
 
-    // HANDS DETECTED: Smooth following with minimum distance swarm algorithm
+    // HANDS DETECTED: Same sphere shape as no-hands, but centered on each hand
     const centers: THREE.Vector3[] = []
     this.handControls.forEach(c => centers.push(new THREE.Vector3(c.palm.x, c.palm.y, c.palm.z)))
 
-    // Calculate hand distance to scale sphere radius (similar to cohesive/needleSphere behavior)
-    let handDistance = 0
-    if (centers.length >= 2) {
-      handDistance = centers[0].distanceTo(centers[1])
-    } else if (centers.length === 1) {
-      handDistance = 20 // Default for single hand
-    } else {
-      handDistance = 10 // Default for no hands (shouldn't reach here)
-    }
-
-    // Scale sphere radius based on hand separation to ensure clear separation
-    // When two hands are detected, ensure spheres don't overlap
-    let sphereRadius: number
-    if (centers.length >= 2) {
-      // For two hands: ensure spheres are clearly separated
-      // Maximum radius is 1/3 of hand distance to prevent overlap
-      const maxRadiusForSeparation = handDistance * 0.33
-      // Base radius scales with hand distance, but capped to ensure separation
-      const baseRadius = 6
-      const radiusHandScale = 0.25 // More conservative scaling
-      const dynamicRadius = baseRadius + handDistance * radiusHandScale
-      // Use the smaller of dynamic radius or separation limit
-      sphereRadius = Math.max(6, Math.min(dynamicRadius, maxRadiusForSeparation))
-    } else {
-      // Single hand: can use larger radius
-      sphereRadius = 12
-    }
-    
-    const shellMultiplier = 1.8
-    const swimSpeed = 8.0 // Increased swim speed
+    // Use SAME sphere radius as no-hands case for consistent shape
+    const sphereRadius = 12 // Same as no-hands case
+    const shellMultiplier = 1.8 // Same as no-hands case
+    const swimSpeed = 5.0 // Same as no-hands case
     const time = performance.now() * 0.001
-    const followSpeed = 0.3 // Significantly increased follow speed for faster formation
+    const sphereFormationSpeed = 0.4 // Same as no-hands case
 
     // Step 1: Stable assignment using minimum distance algorithm
     // Only reassign if significantly closer to another center (prevents sudden jumps)
@@ -582,157 +637,100 @@ export class OptimizedParticleSystem {
       }
     }
 
-    // Step 2: Orbital mechanics - particles rotate around hand with gravitational force (cohesive-like)
+    // Step 2: Use SAME sphere formation logic as no-hands case for consistent shape
     for (let i = 0; i < this.particles.length; i++) {
       const particle = this.particles[i]
       const centerIndex = particle.assignedCenterIndex ?? 0
       const center = centers[centerIndex]
 
-      // Use same logic as no-hands: sphere formation with orbital rotation
+      // Use SAME logic as no-hands: same sphere radius, same shell multiplier
       const shell = particle.groupIndex === 0 ? 1 : shellMultiplier
       const targetRadius = sphereRadius * shell
 
-      // Calculate radial vector from center to particle (gravitational reference)
-      const toCenter = center.clone().sub(particle.position)
-      const distToCenter = toCenter.length()
+      // Get current position relative to center
+      const toParticle = particle.position.clone().sub(center)
+      const currentDist = toParticle.length()
       
-      // Gravitational force (cohesive-like): always pulls towards hand center
-      const gravitationalStrength = 30.0 // Strong gravitational pull
-      const coreRadius = targetRadius * 0.25 // Inner core where repulsion starts
-      const cohesionRadius = targetRadius * 1.2 // Cohesion zone radius
-      
-      let gravitationalForce = new THREE.Vector3(0, 0, 0)
-      if (distToCenter > 0.01) {
-        const toCenterNorm = toCenter.clone().normalize()
-        
-        if (distToCenter > cohesionRadius) {
-          // Far from center: strong pull towards center (cohesive behavior)
-          const pullStrength = gravitationalStrength * 1.5
-          gravitationalForce = toCenterNorm.clone().multiplyScalar(pullStrength)
-        } else if (distToCenter < coreRadius) {
-          // Too close to center: push away to maintain orbit
-          const pushStrength = gravitationalStrength * 0.6 * (1.0 - distToCenter / coreRadius)
-          gravitationalForce = toCenterNorm.clone().multiplyScalar(-pushStrength)
-        } else {
-          // In orbital zone: maintain gravitational pull (cohesive towards center)
-          const pullStrength = gravitationalStrength * 0.4
-          gravitationalForce = toCenterNorm.clone().multiplyScalar(pullStrength)
-        }
-      }
-      
-      // Apply gravitational force to velocity
-      particle.velocity.add(gravitationalForce.clone().multiplyScalar(deltaTime))
-      
-      // Calculate radial direction for orbital mechanics
-      const radial = particle.position.clone().sub(center)
-      const radialDist = radial.length()
-      let radialDir = new THREE.Vector3(0, 0, 0)
-      if (radialDist > 0.01) {
-        radialDir = radial.clone().normalize()
+      // STRICT: Always project to exact sphere surface first (same as no-hands)
+      let toSurface: THREE.Vector3
+      if (currentDist > 0.01) {
+        toSurface = toParticle.clone().normalize()
       } else {
         // If at center, use stored direction
-        radialDir = particle.direction.clone().normalize()
+        toSurface = particle.direction.clone().normalize()
       }
       
-      // Calculate target position on sphere (cohesive target)
-      const targetPos = radialDir.clone().multiplyScalar(targetRadius).add(center)
+      // Calculate target position on sphere
+      const surfacePos = toSurface.clone().multiplyScalar(targetRadius).add(center)
       
-      // Smoothly interpolate to target position (cohesive following)
-      if (!particle.targetPosition) {
-        particle.targetPosition = targetPos.clone()
+      // Fast convergence to sphere: quickly move particles to sphere surface (same as no-hands)
+      if (Math.abs(currentDist - targetRadius) > 0.5) {
+        particle.position.lerp(surfacePos, sphereFormationSpeed)
       } else {
-        // Smoothly update target as center moves (cohesive behavior)
-        particle.targetPosition.lerp(targetPos, followSpeed)
+        particle.position.copy(surfacePos)
       }
       
-      // ORBITAL MECHANICS: Calculate orbital velocity (perpendicular to radial direction)
-      // This creates rotation around the hand like gravitational orbits
+      // Update stored direction
+      const updatedToSurface = particle.position.clone().sub(center)
+      if (updatedToSurface.lengthSq() > 0.0001) {
+        particle.direction.copy(updatedToSurface.normalize())
+      }
+      
+      // Create tangential swimming motion (swarm rotating around sphere) - SAME as no-hands
+      // Use two perpendicular tangent vectors for 3D flow
       const up = new THREE.Vector3(0, 1, 0)
-      let orbitalAxis = new THREE.Vector3()
-      orbitalAxis.crossVectors(radialDir, up)
-      if (orbitalAxis.lengthSq() < 0.01) {
-        // If radial is parallel to up, use different axis
-        orbitalAxis.crossVectors(radialDir, new THREE.Vector3(1, 0, 0))
+      let tangent1 = new THREE.Vector3()
+      tangent1.crossVectors(toSurface, up)
+      if (tangent1.lengthSq() < 0.01) {
+        tangent1.crossVectors(toSurface, new THREE.Vector3(1, 0, 0))
       }
-      orbitalAxis.normalize()
+      tangent1.normalize()
       
-      // Calculate orbital velocity direction (tangential to sphere, perpendicular to radial)
-      let orbitalDirection = new THREE.Vector3()
-      orbitalDirection.crossVectors(radialDir, orbitalAxis)
-      orbitalDirection.normalize()
-      
-      // Orbital speed: faster when closer (like gravitational orbits)
-      // Use inverse square relationship for more realistic orbital mechanics
-      const baseOrbitalSpeed = 12.0
-      const orbitalSpeedMultiplier = Math.max(0.5, Math.min(2.0, targetRadius / Math.max(radialDist, 0.1)))
-      const orbitalSpeed = baseOrbitalSpeed * orbitalSpeedMultiplier
-      
-      // Add phase offset for each particle to create cohesive swarm rotation
-      const phase = i * 0.015 + time * 0.3
-      const phaseOffset = Math.cos(phase) * 0.3 // Slight variation in orbital plane
-      orbitalDirection.applyAxisAngle(radialDir, phaseOffset)
-      
-      // Calculate desired orbital velocity
-      const desiredOrbitalVelocity = orbitalDirection.clone().multiplyScalar(orbitalSpeed)
-      
-      // Blend current velocity with orbital velocity (cohesive rotation)
-      // Keep some radial component for gravitational pull, add orbital component
-      const currentRadialVel = radialDir.clone().multiplyScalar(
-        particle.velocity.clone().dot(radialDir)
+      let tangent2 = new THREE.Vector3()
+      tangent2.crossVectors(toSurface, tangent1)
+      tangent2.normalize()
+
+      // Phase offset for each particle creates wave-like swarming (same as no-hands)
+      const phase = i * 0.01 + time * 0.5
+      const swimDirection = tangent1
+        .multiplyScalar(Math.cos(phase) * swimSpeed)
+        .add(tangent2.multiplyScalar(Math.sin(phase) * swimSpeed))
+
+      // Update velocity for smooth swarming (only tangential component) - SAME as no-hands
+      // Remove any radial component to maintain sphere
+      const currentRadial = toSurface.clone().multiplyScalar(
+        particle.velocity.clone().dot(toSurface)
       )
-      const currentTangentialVel = particle.velocity.clone().sub(currentRadialVel)
+      const tangentialVelocity = particle.velocity.clone().sub(currentRadial)
       
-      // Smoothly transition to orbital velocity (cohesive behavior)
-      particle.velocity.lerp(
-        currentRadialVel.clone().add(desiredOrbitalVelocity),
-        deltaTime * 5.0
-      )
+      // Blend tangential velocities
+      tangentialVelocity.lerp(swimDirection, deltaTime * 3.0)
+      particle.velocity.copy(tangentialVelocity)
       
-      // Apply velocity to position
+      // Move particle along sphere surface
       particle.position.add(particle.velocity.clone().multiplyScalar(deltaTime))
       
-      // Cohesive constraint: smoothly move towards target sphere surface
-      particle.position.lerp(particle.targetPosition, followSpeed * 1.2)
-      
-      // Ensure we're on sphere surface (cohesive formation)
-      const toCurrent = particle.position.clone().sub(center)
-      if (toCurrent.lengthSq() > 0.01) {
-        const dist = toCurrent.length()
-        if (Math.abs(dist - targetRadius) > 1.5) {
-          toCurrent.normalize().multiplyScalar(targetRadius)
-          particle.position.lerp(toCurrent.add(center), 0.15)
-          // Update target to match
-          particle.targetPosition.copy(particle.position)
-        }
-      }
-      
-      // Apply velocity damping for stability
-      particle.velocity.multiplyScalar(0.97)
-      
-      // Clamp velocity magnitude
-      const maxSpeed = 30.0
-      if (particle.velocity.length() > maxSpeed) {
-        particle.velocity.normalize().multiplyScalar(maxSpeed)
-      }
-      
-      // Re-project to sphere after movement (maintain orbital radius)
-      const newToSurface = particle.position.clone().sub(center)
-      if (newToSurface.lengthSq() > 0.01) {
-        const dist = newToSurface.length()
-        if (Math.abs(dist - targetRadius) > 0.8) {
-          newToSurface.normalize().multiplyScalar(targetRadius)
-          particle.position.lerp(newToSurface.add(center), 0.25)
-          particle.targetPosition.copy(particle.position)
-        }
+      // STRICT: Always re-project to exact sphere surface after movement (SAME as no-hands)
+      const newToParticle = particle.position.clone().sub(center)
+      if (newToParticle.lengthSq() > 0.0001) {
+        newToParticle.normalize().multiplyScalar(targetRadius)
+        particle.position.copy(newToParticle.add(center))
+      } else {
+        // Fallback: use stored direction
+        const fallbackPos = particle.direction.clone()
+          .normalize()
+          .multiplyScalar(targetRadius)
+          .add(center)
+        particle.position.copy(fallbackPos)
       }
 
-      // Orient needle in orbital direction (rotating around hand)
-      const orientationDir = particle.velocity.clone().normalize()
-      if (orientationDir.lengthSq() < 0.01) {
-        // Fallback: point in orbital direction
-        orientationDir.copy(orbitalDirection)
+      // Orient needle in swarming direction (same as no-hands)
+      const direction = particle.velocity.clone().normalize()
+      if (direction.lengthSq() < 0.01) {
+        // Fallback: point tangentially
+        direction.copy(tangent1)
       }
-      this.tmpQuaternion.setFromUnitVectors(upAxis, orientationDir)
+      this.tmpQuaternion.setFromUnitVectors(upAxis, direction)
 
       this.matrix.compose(particle.position, this.tmpQuaternion, this.tmpScale)
       this.mesh.setMatrixAt(i, this.matrix)
@@ -816,8 +814,170 @@ export class OptimizedParticleSystem {
     }
   }
 
+  /**
+   * Creates a meditation skeleton in a seated lotus position
+   */
+  private createMeditationSkeleton(): THREE.Group {
+    const skeleton = new THREE.Group()
+    const scale = 3.0 // Overall skeleton scale
+    
+    // Joint size
+    const jointSize = 0.3 * scale
+    const boneRadius = 0.08 * scale
+    
+    // Helper function to create a joint (sphere)
+    const createJoint = (x: number, y: number, z: number) => {
+      const joint = new THREE.Mesh(
+        new THREE.SphereGeometry(jointSize, 8, 6),
+        this.skeletonMaterial
+      )
+      joint.position.set(x * scale, y * scale, z * scale)
+      return joint
+    }
+    
+    // Helper function to create a bone (cylinder)
+    const createBone = (from: THREE.Vector3, to: THREE.Vector3) => {
+      const direction = to.clone().sub(from)
+      const length = direction.length()
+      const bone = new THREE.Mesh(
+        new THREE.CylinderGeometry(boneRadius, boneRadius, length, 8),
+        this.skeletonMaterial
+      )
+      bone.position.copy(from.clone().add(to).multiplyScalar(0.5))
+      bone.lookAt(to)
+      bone.rotateX(Math.PI / 2) // Rotate to align with direction
+      return bone
+    }
+    
+    // Meditation pose: seated, legs crossed, hands on knees
+    // Head
+    const head = createJoint(0, 4.5, 0)
+    skeleton.add(head)
+    
+    // Neck
+    const neck = createJoint(0, 3.8, 0)
+    skeleton.add(neck)
+    skeleton.add(createBone(head.position, neck.position))
+    
+    // Torso (spine)
+    const chest = createJoint(0, 3.0, 0)
+    const waist = createJoint(0, 1.5, 0)
+    const pelvis = createJoint(0, 0.5, 0)
+    skeleton.add(chest, waist, pelvis)
+    skeleton.add(createBone(neck.position, chest.position))
+    skeleton.add(createBone(chest.position, waist.position))
+    skeleton.add(createBone(waist.position, pelvis.position))
+    
+    // Left shoulder and arm (meditation pose: hand on knee)
+    const leftShoulder = createJoint(-0.8, 2.8, 0)
+    const leftElbow = createJoint(-1.2, 1.8, 0.3)
+    const leftWrist = createJoint(-1.0, 0.8, 0.5)
+    const leftHand = createJoint(-0.9, 0.5, 0.6)
+    skeleton.add(leftShoulder, leftElbow, leftWrist, leftHand)
+    skeleton.add(createBone(chest.position, leftShoulder.position))
+    skeleton.add(createBone(leftShoulder.position, leftElbow.position))
+    skeleton.add(createBone(leftElbow.position, leftWrist.position))
+    skeleton.add(createBone(leftWrist.position, leftHand.position))
+    
+    // Right shoulder and arm (meditation pose: hand on knee)
+    const rightShoulder = createJoint(0.8, 2.8, 0)
+    const rightElbow = createJoint(1.2, 1.8, 0.3)
+    const rightWrist = createJoint(1.0, 0.8, 0.5)
+    const rightHand = createJoint(0.9, 0.5, 0.6)
+    skeleton.add(rightShoulder, rightElbow, rightWrist, rightHand)
+    skeleton.add(createBone(chest.position, rightShoulder.position))
+    skeleton.add(createBone(rightShoulder.position, rightElbow.position))
+    skeleton.add(createBone(rightElbow.position, rightWrist.position))
+    skeleton.add(createBone(rightWrist.position, rightHand.position))
+    
+    // Left leg (crossed in meditation pose - lotus position)
+    // Left leg goes under, foot rests on right thigh
+    const leftHip = createJoint(-0.3, 0.2, 0)
+    const leftKnee = createJoint(-0.2, -0.2, 0.4) // Knee pulled in and forward
+    const leftAnkle = createJoint(0.3, 0.1, 0.5) // Ankle crosses to right side
+    const leftFoot = createJoint(0.5, 0.3, 0.4) // Foot rests on right thigh
+    skeleton.add(leftHip, leftKnee, leftAnkle, leftFoot)
+    skeleton.add(createBone(pelvis.position, leftHip.position))
+    skeleton.add(createBone(leftHip.position, leftKnee.position))
+    skeleton.add(createBone(leftKnee.position, leftAnkle.position))
+    skeleton.add(createBone(leftAnkle.position, leftFoot.position))
+    
+    // Right leg (crossed in meditation pose - lotus position)
+    // Right leg goes over, foot rests on left thigh
+    const rightHip = createJoint(0.3, 0.2, 0)
+    const rightKnee = createJoint(0.4, 0.0, 0.3) // Knee pulled in and up
+    const rightAnkle = createJoint(0.2, 0.4, 0.2) // Ankle crosses to left side, higher
+    const rightFoot = createJoint(-0.3, 0.5, 0.1) // Foot rests on left thigh (higher)
+    skeleton.add(rightHip, rightKnee, rightAnkle, rightFoot)
+    skeleton.add(createBone(pelvis.position, rightHip.position))
+    skeleton.add(createBone(rightHip.position, rightKnee.position))
+    skeleton.add(createBone(rightKnee.position, rightAnkle.position))
+    skeleton.add(createBone(rightAnkle.position, rightFoot.position))
+    
+    return skeleton
+  }
+  
+  /**
+   * Updates meditation skeletons to match hand centers
+   */
+  private updateSkeletons(): void {
+    // Only show skeletons for needleSwarm behavior
+    if (this.params.behavior !== 'needleSwarm') {
+      // Remove all skeletons if not in swarm mode
+      this.skeletons.forEach(skeleton => {
+        this.scene.remove(skeleton)
+        skeleton.traverse((child) => {
+          if (child instanceof THREE.Mesh) {
+            child.geometry.dispose()
+          }
+        })
+      })
+      this.skeletons = []
+      return
+    }
+    
+    const centers: THREE.Vector3[] = []
+    this.handControls.forEach(c => {
+      centers.push(new THREE.Vector3(c.palm.x, c.palm.y, c.palm.z))
+    })
+    
+    // Remove excess skeletons if we have fewer hands
+    while (this.skeletons.length > centers.length) {
+      const skeleton = this.skeletons.pop()
+      if (skeleton) {
+        this.scene.remove(skeleton)
+        skeleton.traverse((child) => {
+          if (child instanceof THREE.Mesh) {
+            child.geometry.dispose()
+          }
+        })
+      }
+    }
+    
+    // Add skeletons if we have more hands
+    while (this.skeletons.length < centers.length) {
+      const skeleton = this.createMeditationSkeleton()
+      this.skeletons.push(skeleton)
+      this.scene.add(skeleton)
+    }
+    
+    // Update skeleton positions to match hand centers
+    for (let i = 0; i < centers.length; i++) {
+      const skeleton = this.skeletons[i]
+      const center = centers[i]
+      
+      // Position skeleton at hand center
+      // Skeleton's pelvis is at y=1.5 in local coords, so offset to center it
+      skeleton.position.set(center.x, center.y - 1.5, center.z)
+      
+      // Optional: Rotate skeleton to face forward (can be adjusted)
+      skeleton.rotation.y = 0
+    }
+  }
+
   setHandControls(handControls: HandControl[]): void {
     this.handControls = handControls
+    this.updateSkeletons()
   }
 
   render(): void {
@@ -867,8 +1027,21 @@ export class OptimizedParticleSystem {
 
   dispose(): void {
     this.stopAnimation()
+    
+    // Dispose skeletons
+    this.skeletons.forEach(skeleton => {
+      this.scene.remove(skeleton)
+      skeleton.traverse((child) => {
+        if (child instanceof THREE.Mesh) {
+          child.geometry.dispose()
+        }
+      })
+    })
+    this.skeletons = []
+    
     this.geometry.dispose()
     this.material.dispose()
+    this.skeletonMaterial.dispose()
     this.mesh.dispose()
     this.renderer.dispose()
   }
