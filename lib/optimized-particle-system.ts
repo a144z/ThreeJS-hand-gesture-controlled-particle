@@ -582,142 +582,155 @@ export class OptimizedParticleSystem {
       }
     }
 
-    // Step 2: Smoothly move particles to their optimal positions with gravitational pull
+    // Step 2: Orbital mechanics - particles rotate around hand with gravitational force (cohesive-like)
     for (let i = 0; i < this.particles.length; i++) {
       const particle = this.particles[i]
       const centerIndex = particle.assignedCenterIndex ?? 0
       const center = centers[centerIndex]
 
-      // Use same logic as no-hands: sphere formation with fish-like swimming
+      // Use same logic as no-hands: sphere formation with orbital rotation
       const shell = particle.groupIndex === 0 ? 1 : shellMultiplier
       const targetRadius = sphereRadius * shell
 
-      // Calculate distance to assigned hand center (gravitational force)
+      // Calculate radial vector from center to particle (gravitational reference)
       const toCenter = center.clone().sub(particle.position)
       const distToCenter = toCenter.length()
       
-      // Gravitational pull: particles swim towards their assigned hand center like fish
-      // Stronger pull when far from center, weaker when close (to form sphere shell)
-      const gravitationalStrength = 25.0 // Dramatically increased gravitational pull
-      const coreRadius = targetRadius * 0.3 // Inner core where repulsion starts
+      // Gravitational force (cohesive-like): always pulls towards hand center
+      const gravitationalStrength = 30.0 // Strong gravitational pull
+      const coreRadius = targetRadius * 0.25 // Inner core where repulsion starts
+      const cohesionRadius = targetRadius * 1.2 // Cohesion zone radius
       
       let gravitationalForce = new THREE.Vector3(0, 0, 0)
       if (distToCenter > 0.01) {
         const toCenterNorm = toCenter.clone().normalize()
         
-        if (distToCenter > targetRadius) {
-          // Outside sphere: very strong pull towards center for fast convergence
-          const pullStrength = gravitationalStrength * (1.0 - targetRadius / Math.max(distToCenter, targetRadius))
-          gravitationalForce = toCenterNorm.clone().multiplyScalar(pullStrength * 1.5) // Extra boost when outside
+        if (distToCenter > cohesionRadius) {
+          // Far from center: strong pull towards center (cohesive behavior)
+          const pullStrength = gravitationalStrength * 1.5
+          gravitationalForce = toCenterNorm.clone().multiplyScalar(pullStrength)
         } else if (distToCenter < coreRadius) {
-          // Too close to center: push away
-          const pushStrength = gravitationalStrength * 0.5 * (1.0 - distToCenter / coreRadius)
+          // Too close to center: push away to maintain orbit
+          const pushStrength = gravitationalStrength * 0.6 * (1.0 - distToCenter / coreRadius)
           gravitationalForce = toCenterNorm.clone().multiplyScalar(-pushStrength)
         } else {
-          // In shell zone: gentle pull to maintain sphere
-          const pullStrength = gravitationalStrength * 0.3 * (1.0 - (distToCenter - coreRadius) / (targetRadius - coreRadius))
+          // In orbital zone: maintain gravitational pull (cohesive towards center)
+          const pullStrength = gravitationalStrength * 0.4
           gravitationalForce = toCenterNorm.clone().multiplyScalar(pullStrength)
         }
       }
       
-      // Apply gravitational force to velocity (fish swimming towards force)
+      // Apply gravitational force to velocity
       particle.velocity.add(gravitationalForce.clone().multiplyScalar(deltaTime))
       
-      // Calculate optimal position on sphere (minimum distance from current position)
-      const toParticle = particle.position.clone().sub(center)
-      const currentDist = toParticle.length()
-      
-      // Get direction vector (maintain relative position on sphere)
-      let direction: THREE.Vector3
-      if (currentDist > 0.01) {
-        direction = toParticle.clone().normalize()
+      // Calculate radial direction for orbital mechanics
+      const radial = particle.position.clone().sub(center)
+      const radialDist = radial.length()
+      let radialDir = new THREE.Vector3(0, 0, 0)
+      if (radialDist > 0.01) {
+        radialDir = radial.clone().normalize()
       } else {
-        // If at center, use stored direction or random
-        direction = particle.direction.clone().normalize()
+        // If at center, use stored direction
+        radialDir = particle.direction.clone().normalize()
       }
       
-      // Calculate target position on sphere
-      const targetPos = direction.clone().multiplyScalar(targetRadius).add(center)
+      // Calculate target position on sphere (cohesive target)
+      const targetPos = radialDir.clone().multiplyScalar(targetRadius).add(center)
       
-      // Smoothly interpolate to target position (prevents sudden jumps)
+      // Smoothly interpolate to target position (cohesive following)
       if (!particle.targetPosition) {
         particle.targetPosition = targetPos.clone()
       } else {
-        // Smoothly update target as center moves
+        // Smoothly update target as center moves (cohesive behavior)
         particle.targetPosition.lerp(targetPos, followSpeed)
       }
       
-      // Apply velocity to position (particles swim towards center)
+      // ORBITAL MECHANICS: Calculate orbital velocity (perpendicular to radial direction)
+      // This creates rotation around the hand like gravitational orbits
+      const up = new THREE.Vector3(0, 1, 0)
+      let orbitalAxis = new THREE.Vector3()
+      orbitalAxis.crossVectors(radialDir, up)
+      if (orbitalAxis.lengthSq() < 0.01) {
+        // If radial is parallel to up, use different axis
+        orbitalAxis.crossVectors(radialDir, new THREE.Vector3(1, 0, 0))
+      }
+      orbitalAxis.normalize()
+      
+      // Calculate orbital velocity direction (tangential to sphere, perpendicular to radial)
+      let orbitalDirection = new THREE.Vector3()
+      orbitalDirection.crossVectors(radialDir, orbitalAxis)
+      orbitalDirection.normalize()
+      
+      // Orbital speed: faster when closer (like gravitational orbits)
+      // Use inverse square relationship for more realistic orbital mechanics
+      const baseOrbitalSpeed = 12.0
+      const orbitalSpeedMultiplier = Math.max(0.5, Math.min(2.0, targetRadius / Math.max(radialDist, 0.1)))
+      const orbitalSpeed = baseOrbitalSpeed * orbitalSpeedMultiplier
+      
+      // Add phase offset for each particle to create cohesive swarm rotation
+      const phase = i * 0.015 + time * 0.3
+      const phaseOffset = Math.cos(phase) * 0.3 // Slight variation in orbital plane
+      orbitalDirection.applyAxisAngle(radialDir, phaseOffset)
+      
+      // Calculate desired orbital velocity
+      const desiredOrbitalVelocity = orbitalDirection.clone().multiplyScalar(orbitalSpeed)
+      
+      // Blend current velocity with orbital velocity (cohesive rotation)
+      // Keep some radial component for gravitational pull, add orbital component
+      const currentRadialVel = radialDir.clone().multiplyScalar(
+        particle.velocity.clone().dot(radialDir)
+      )
+      const currentTangentialVel = particle.velocity.clone().sub(currentRadialVel)
+      
+      // Smoothly transition to orbital velocity (cohesive behavior)
+      particle.velocity.lerp(
+        currentRadialVel.clone().add(desiredOrbitalVelocity),
+        deltaTime * 5.0
+      )
+      
+      // Apply velocity to position
       particle.position.add(particle.velocity.clone().multiplyScalar(deltaTime))
       
-      // Smoothly move particle towards target sphere surface (faster convergence)
-      particle.position.lerp(particle.targetPosition, followSpeed * 1.5)
+      // Cohesive constraint: smoothly move towards target sphere surface
+      particle.position.lerp(particle.targetPosition, followSpeed * 1.2)
       
-      // Ensure we're on sphere surface
+      // Ensure we're on sphere surface (cohesive formation)
       const toCurrent = particle.position.clone().sub(center)
       if (toCurrent.lengthSq() > 0.01) {
-        // Only strictly enforce if way off, otherwise let physics do it naturally
-        // This allows for more organic "swarming" while still keeping shape
         const dist = toCurrent.length()
-        if (Math.abs(dist - targetRadius) > 2.0) {
-           toCurrent.normalize().multiplyScalar(targetRadius)
-           particle.position.lerp(toCurrent.add(center), 0.1)
+        if (Math.abs(dist - targetRadius) > 1.5) {
+          toCurrent.normalize().multiplyScalar(targetRadius)
+          particle.position.lerp(toCurrent.add(center), 0.15)
+          // Update target to match
+          particle.targetPosition.copy(particle.position)
         }
       }
-
-      // Create tangential swimming motion (fish swimming around sphere)
-      const toSurface = particle.position.clone().sub(center).normalize()
-      const up = new THREE.Vector3(0, 1, 0)
-      let tangent1 = new THREE.Vector3()
-      tangent1.crossVectors(toSurface, up)
-      if (tangent1.lengthSq() < 0.01) {
-        tangent1.crossVectors(toSurface, new THREE.Vector3(1, 0, 0))
-      }
-      tangent1.normalize()
       
-      let tangent2 = new THREE.Vector3()
-      tangent2.crossVectors(toSurface, tangent1)
-      tangent2.normalize()
-
-      // Phase offset for each particle creates wave-like swimming
-      const phase = i * 0.01 + time * 0.5
-      const swimDirection = tangent1
-        .multiplyScalar(Math.cos(phase) * swimSpeed)
-        .add(tangent2.multiplyScalar(Math.sin(phase) * swimSpeed))
-
-      // Add tangential swimming to velocity (fish swimming around sphere)
-      particle.velocity.lerp(swimDirection, deltaTime * 4.0) // Quicker response to swim direction
+      // Apply velocity damping for stability
+      particle.velocity.multiplyScalar(0.97)
       
-      // Apply velocity damping to prevent excessive speed (less damping for faster movement)
-      particle.velocity.multiplyScalar(0.96)
-      
-      // Clamp velocity magnitude (increased max speed)
-      const maxSpeed = 25.0
+      // Clamp velocity magnitude
+      const maxSpeed = 30.0
       if (particle.velocity.length() > maxSpeed) {
         particle.velocity.normalize().multiplyScalar(maxSpeed)
       }
       
-      // Apply tangential velocity while maintaining sphere
-      particle.position.add(particle.velocity.clone().multiplyScalar(deltaTime))
-      
-      // Re-project to sphere after movement
+      // Re-project to sphere after movement (maintain orbital radius)
       const newToSurface = particle.position.clone().sub(center)
       if (newToSurface.lengthSq() > 0.01) {
-        // Softer re-projection for organic feel, but still keeps shape
         const dist = newToSurface.length()
-        if (Math.abs(dist - targetRadius) > 0.5) {
-             newToSurface.normalize().multiplyScalar(targetRadius)
-             particle.position.lerp(newToSurface.add(center), 0.2)
-             // Update target to match
-             particle.targetPosition.copy(particle.position)
+        if (Math.abs(dist - targetRadius) > 0.8) {
+          newToSurface.normalize().multiplyScalar(targetRadius)
+          particle.position.lerp(newToSurface.add(center), 0.25)
+          particle.targetPosition.copy(particle.position)
         }
       }
 
-      // Orient needle in swimming direction (fish-like)
+      // Orient needle in orbital direction (rotating around hand)
       const orientationDir = particle.velocity.clone().normalize()
       if (orientationDir.lengthSq() < 0.01) {
-        // Fallback: point tangentially
-        orientationDir.copy(tangent1)
+        // Fallback: point in orbital direction
+        orientationDir.copy(orbitalDirection)
       }
       this.tmpQuaternion.setFromUnitVectors(upAxis, orientationDir)
 
