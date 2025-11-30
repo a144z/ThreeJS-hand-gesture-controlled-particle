@@ -1,4 +1,5 @@
 import type { Metadata } from 'next'
+import Script from 'next/script'
 import './globals.css'
 
 export const metadata: Metadata = {
@@ -12,26 +13,31 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html lang="en">
-      <head>
-        <script
+    <html lang="en" suppressHydrationWarning>
+      <head />
+      <body suppressHydrationWarning>
+        {children}
+        <Script
           src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"
           crossOrigin="anonymous"
-        ></script>
-        <script
+          strategy="beforeInteractive"
+        />
+        <Script
           src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js"
           crossOrigin="anonymous"
-        ></script>
-        <script
+          strategy="beforeInteractive"
+        />
+        <Script
           src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"
           crossOrigin="anonymous"
-        ></script>
-        <script
+          strategy="beforeInteractive"
+        />
+        <Script
           src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"
           crossOrigin="anonymous"
-        ></script>
-      </head>
-      <body>{children}</body>
+          strategy="beforeInteractive"
+        />
+      </body>
     </html>
   )
 }

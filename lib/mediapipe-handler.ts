@@ -7,12 +7,26 @@
  * - Error recovery
  */
 
+interface Vector3Like {
+  x: number
+  y: number
+  z: number
+}
+
 interface HandControl {
-  palm: {
-    x: number
-    y: number
-    z: number
-  }
+  /**
+   * Approximate palm center in simulation coordinates
+   */
+  palm: Vector3Like
+  /**
+   * Fingertip positions for this hand in simulation coordinates.
+   * Ordered as: [thumb, index, middle, ring, pinky]
+   */
+  fingers: Vector3Like[]
+  /**
+   * Index of this hand in the current frame (0 or 1)
+   */
+  handIndex: number
 }
 
 interface MediaPipeResults {
@@ -129,13 +143,26 @@ export class MediaPipeHandler {
           const palmX = keyPoints.reduce((sum, idx) => sum + handLandmarks[idx].x, 0) / keyPoints.length
           const palmY = keyPoints.reduce((sum, idx) => sum + handLandmarks[idx].y, 0) / keyPoints.length
           const palmZ = keyPoints.reduce((sum, idx) => sum + handLandmarks[idx].z, 0) / keyPoints.length
+          
+          // Fingertips: thumb, index, middle, ring, pinky
+          const fingertipIndices = [4, 8, 12, 16, 20]
+          const fingers: Vector3Like[] = fingertipIndices
+            .map((tipIndex) => handLandmarks[tipIndex])
+            .filter((landmark) => Boolean(landmark))
+            .map((landmark) => ({
+              x: (landmark.x - 0.5) * 50,
+              y: (landmark.y - 0.5) * 50,
+              z: landmark.z * 50
+            }))
 
           handControls.push({
             palm: {
               x: (palmX - 0.5) * 50,
               y: (palmY - 0.5) * 50,
               z: palmZ * 50
-            }
+            },
+            fingers,
+            handIndex: index
           })
 
           // Draw landmarks (optimized rendering)

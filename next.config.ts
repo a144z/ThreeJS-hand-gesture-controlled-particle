@@ -2,9 +2,6 @@ import type { NextConfig } from 'next'
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
-  experimental: {
-    turbo: true,
-  },
   // Optimize bundle
   compiler: {
     removeConsole: process.env.NODE_ENV === 'production',
