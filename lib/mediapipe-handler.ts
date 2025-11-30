@@ -56,6 +56,7 @@ export class MediaPipeHandler {
   private isProcessing = false
   private config: Required<HandDetectionConfig>
   private handControlsCallback?: (controls: HandControl[]) => void
+  private duplicateVideoCleanupInterval: number | null = null
 
   constructor(config: HandDetectionConfig = {}) {
     this.config = {
@@ -240,6 +241,38 @@ export class MediaPipeHandler {
   }
 
   /**
+   * Clean up any duplicate video elements (especially on mobile)
+   */
+  private cleanupDuplicateVideos(): void {
+    if (!this.videoElement) return
+    
+    const allVideos = document.querySelectorAll('video')
+    allVideos.forEach((video) => {
+      // Keep only our main video element, hide/remove any others
+      if (video.id !== 'input-video' && video !== this.videoElement) {
+        // Hide and remove duplicate videos
+        video.style.display = 'none'
+        video.style.visibility = 'hidden'
+        video.style.opacity = '0'
+        video.style.position = 'absolute'
+        video.style.pointerEvents = 'none'
+        video.style.zIndex = '-1'
+        
+        // Try to remove if it's not in use
+        try {
+          const videoParent = video.parentElement
+          const mainVideoParent = this.videoElement?.parentElement
+          if (videoParent && mainVideoParent && videoParent !== mainVideoParent) {
+            video.remove()
+          }
+        } catch (e) {
+          // Ignore errors when removing
+        }
+      }
+    })
+  }
+
+  /**
    * Start hand detection
    */
   async start(
@@ -275,9 +308,12 @@ export class MediaPipeHandler {
 
       // Start camera processing
       const Camera = (window as any).Camera
+      
+      // Prevent MediaPipe from creating duplicate video elements
+      // Use the existing video element directly
       this.camera = new Camera(this.videoElement, {
         onFrame: async () => {
-          if (this.hands && !this.isProcessing) {
+          if (this.hands && !this.isProcessing && this.videoElement) {
             await this.hands.send({ image: this.videoElement })
           }
         },
@@ -286,6 +322,16 @@ export class MediaPipeHandler {
       })
 
       await this.camera.start()
+      
+      // Clean up duplicate videos immediately and periodically
+      this.cleanupDuplicateVideos()
+      setTimeout(() => this.cleanupDuplicateVideos(), 100)
+      setTimeout(() => this.cleanupDuplicateVideos(), 500)
+      
+      // Set up periodic cleanup (especially important on mobile)
+      this.duplicateVideoCleanupInterval = window.setInterval(() => {
+        this.cleanupDuplicateVideos()
+      }, 2000) // Check every 2 seconds
     } catch (error) {
       console.error('MediaPipe initialization failed:', error)
       if (this.gestureLabel) {
@@ -324,6 +370,12 @@ export class MediaPipeHandler {
    * Cleanup resources
    */
   cleanup(): void {
+    // Clear duplicate video cleanup interval
+    if (this.duplicateVideoCleanupInterval !== null) {
+      clearInterval(this.duplicateVideoCleanupInterval)
+      this.duplicateVideoCleanupInterval = null
+    }
+    
     if (this.camera) {
       try {
         this.camera.stop()
@@ -344,6 +396,9 @@ export class MediaPipeHandler {
       const stream = this.videoElement.srcObject as MediaStream
       stream.getTracks().forEach(track => track.stop())
     }
+
+    // Final cleanup of duplicate videos
+    this.cleanupDuplicateVideos()
 
     this.hands = null
     this.camera = null
